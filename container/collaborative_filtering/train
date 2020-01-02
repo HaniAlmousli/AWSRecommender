@@ -1,0 +1,89 @@
+#!/usr/bin/env python3.5
+
+# A sample training component that trains a simple collaborative filtering model.
+# Input is specified as CSV with a data point in each column such as 1,100,3000 
+
+from __future__ import print_function
+
+import os
+import json
+import pickle
+import sys
+import traceback
+
+import numpy as np 
+import pandas as pd 
+from sklearn.metrics import pairwise_distances
+from scipy.spatial.distance import cosine, correlation
+
+
+
+prefix = '/opt/ml/'
+
+input_path = prefix + 'input/data'
+output_path = os.path.join(prefix, 'output')
+model_path = os.path.join(prefix, 'model')
+param_path = os.path.join(prefix, 'input/config/hyperparameters.json')
+
+# This algorithm has a single channel of input data called 'training'. Since we run in
+# File mode, the input files are copied to the directory specified here.
+channel_name='training'
+training_path = os.path.join(input_path, channel_name)
+
+# The function to execute the training.
+def train():
+    print('Starting the training....')
+    try:
+        # Read in any hyperparameters that the user passed with the training job
+        with open(param_path, 'r') as tc:
+            trainingParams = json.load(tc)
+            #ex: model.set_hyperparameters(metric='euclidean')
+
+        #Data Transformation ("Complex data Transformation are better done in a seprate place")
+        u_cols = ['user_id', 'age', 'sex', 'occupation', 'zip_code']
+        users = pd.read_csv(os.path.join(training_path,'u.user'), sep='|', names=u_cols,
+                            encoding='latin-1', parse_dates=True) 
+
+        r_cols = ['user_id', 'movie_id', 'rating', 'unix_timestamp']
+        ratings = pd.read_csv(os.path.join(training_path,'u.data'), sep='\t', names=r_cols,
+                            encoding='latin-1')
+
+        m_cols = ['movie_id', 'title', 'release_date', 'video_release_date', 'imdb_url']
+        movies = pd.read_csv(os.path.join(training_path,'u.item'), sep='|', names=m_cols, usecols=range(5),
+                            encoding='latin-1')
+
+        movie_ratings = pd.merge(movies, ratings)
+        df = pd.merge(movie_ratings, users)
+
+        df.drop(df.columns[[3,4,7]], axis=1, inplace=True)
+        ratings.drop( "unix_timestamp", inplace = True, axis = 1 ) 
+        movies.drop(movies.columns[[3,4]], inplace = True, axis = 1 )
+        ratings_matrix = ratings.pivot_table(index=['movie_id'],columns=['user_id'],values='rating').reset_index(drop=True)
+        ratings_matrix.fillna( 0, inplace = True )
+        # Here we only support a single hyperparameter. Note that hyperparameters are always passed in as
+        # strings, so we need to do any necessary conversions.
+        metric = trainingParams.get('metric', 'cosine')
+        movie_similarity = 1 - pairwise_distances( ratings_matrix.as_matrix(), metric=metric ) #[‘cityblock’, ‘cosine’, ‘euclidean’, ‘l1’, ‘l2’, ‘manhattan’]
+        np.fill_diagonal( movie_similarity, 0 ) #Filling diagonals with 0s for future use when sorting is done
+        ratings_matrix = pd.DataFrame( movie_similarity )
+
+        # Save the model. The model is mainly the movies data set with the ranking matrix 
+        with open(os.path.join(model_path, 'collaborative-filtering-model.pkl'), 'wb') as out:
+            pickle.dump([ratings_matrix,movies], out)
+        print('Training completed .....')
+    except Exception as e:
+        # Write out an error file. This will be returned as the failureReason in the
+        # DescribeTrainingJob result.
+        trc = traceback.format_exc()
+        with open(os.path.join(output_path, 'failure'), 'w') as s:
+            s.write('Exception during training: ' + str(e) + '\n' + trc)
+        # Printing this causes the exception to be in the training job logs, as well.
+        print('Exception during training: ' + str(e) + '\n' + trc, file=sys.stderr)
+        # A non-zero exit code causes the training job to be marked as Failed.
+        sys.exit(255)
+
+if __name__ == '__main__':
+    train()
+    # A zero exit code causes the job to be marked a Succeeded.
+    sys.exit(0)
+
